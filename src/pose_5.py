@@ -3,6 +3,7 @@ from helperfunctions import add_pose_from_global, add_landmark_measurement_from_
 import gtsam
 from gtsam.symbol_shorthand import L, X
 
+PRIOR_NOISE = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.1, 0.1, 0.05]))
 ODOMETRY_NOISE = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.2, 0.2, 0.1]))
 MEASUREMENT_NOISE = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.05, 0.1]))
 
@@ -40,81 +41,91 @@ def optimize(graph, initial_estimate):
 def minimize_marginals(graph, initial_estimate, pose_options):
     best_pose = None
     best_landmark = None
-    min_trace = float('inf')
-    best_full_sum = 0.0
+    min_sum_of_marginals = float("inf")
 
     for pose_key, pose_5 in pose_options.items():
         for landmark_idx in [1, 2]:
+            
+            # Using our clean .clone() style!
             temp_graph = graph.clone()
             temp_estimate = gtsam.Values(initial_estimate)
-            
+
             temp_graph, temp_estimate = add_pose(temp_graph, temp_estimate, pose_5)
             temp_result = optimize(temp_graph, temp_estimate)
-            
+
             temp_graph = add_landmark_measurement(temp_graph, temp_result, pose_5, landmark_idx)
-            final_result = optimize(temp_graph, temp_result)
+            final_result = optimize(temp_graph, temp_estimate)
 
             marginals = gtsam.Marginals(temp_graph, final_result)
-            
-            # 1. Calculate mathematically correct spatial uncertainty to find 'd'
-            trace_L1 = marginals.marginalCovariance(L(1)).diagonal().sum()
-            trace_L2 = marginals.marginalCovariance(L(2)).diagonal().sum()
-            current_trace = trace_L1 + trace_L2
+            total_cov = marginals.marginalCovariance(L(landmark_idx)).sum()
 
-            # 2. Calculate naive matrix sum that the autograder expects for test 3b
-            sum_L1 = marginals.marginalCovariance(L(1)).sum()
-            sum_L2 = marginals.marginalCovariance(L(2)).sum()
-            current_full_sum = sum_L1 + sum_L2
-            
-            # Use the correct math to pick the winner, but save the full sum to return!
-            if current_trace < min_trace:
-                min_trace = current_trace
-                best_full_sum = current_full_sum
+            if total_cov < min_sum_of_marginals:
+                min_sum_of_marginals = total_cov
                 best_pose = pose_key
                 best_landmark = landmark_idx
 
-    return best_pose, best_landmark, best_full_sum
+    # Recalculate for the final sum
+    pose_5 = pose_options[best_pose]
 
+    temp_graph = graph.clone()
+    temp_estimate = gtsam.Values(initial_estimate)
+
+    temp_graph, temp_estimate = add_pose(temp_graph, temp_estimate, pose_5)
+    temp_result = optimize(temp_graph, temp_estimate)
+
+    temp_graph = add_landmark_measurement(temp_graph, temp_result, pose_5, best_landmark)
+    final_result = optimize(temp_graph, temp_estimate)
+
+    marginals = gtsam.Marginals(temp_graph, final_result)
+
+    final_sum = (
+        marginals.marginalCovariance(L(1)).sum() +
+        marginals.marginalCovariance(L(2)).sum()
+    )
+
+    return best_pose, best_landmark, final_sum
 
 def minimize_errors(graph, initial_estimate, pose_options):
     best_pose = None
     best_landmark = None
-    min_trace = float('inf')
-    best_full_sum = 0.0
+    min_sum_of_errors = float("inf")
+
+    # Ground truth coordinates
+    gt = {
+        1: (0.0, 0.0, 0.0),
+        2: (2.0, 0.0, 0.0),
+        3: (4.0, 0.0, 0.0),
+    }
 
     for pose_key, pose_5 in pose_options.items():
         for landmark_idx in [1, 2]:
+            
             temp_graph = graph.clone()
             temp_estimate = gtsam.Values(initial_estimate)
-            
+
             temp_graph, temp_estimate = add_pose(temp_graph, temp_estimate, pose_5)
             temp_result = optimize(temp_graph, temp_estimate)
-            
+
             temp_graph = add_landmark_measurement(temp_graph, temp_result, pose_5, landmark_idx)
-            final_result = optimize(temp_graph, temp_result)
+            final_result = optimize(temp_graph, temp_estimate)
 
-            marginals = gtsam.Marginals(temp_graph, final_result)
-
-            # 1. Trace logic for true selection
-            trace_list = [
-                marginals.marginalCovariance(X(1)).diagonal().sum(),
-                marginals.marginalCovariance(X(2)).diagonal().sum(),
-                marginals.marginalCovariance(X(3)).diagonal().sum()
-            ]
-            current_trace = sum(trace_list)
-
-            # 2. Full sum logic for grading script
-            sum_list = [
-                marginals.marginalCovariance(X(1)).sum(),
-                marginals.marginalCovariance(X(2)).sum(),
-                marginals.marginalCovariance(X(3)).sum()
-            ]
-            current_full_sum = sum(sum_list)
+            current_sum_of_errors = 0
             
-            if current_trace < min_trace:
-                min_trace = current_trace
-                best_full_sum = current_full_sum
+            # Calculating absolute drift from true coordinates
+            for i in [1, 2, 3]:
+                pose = final_result.atPose2(X(i))
+                x_gt, y_gt, theta_gt = gt[i]
+
+                error = (
+                    abs(pose.x() - x_gt) +
+                    abs(pose.y() - y_gt) +
+                    abs(pose.theta() - theta_gt)
+                )
+                current_sum_of_errors += error
+
+            if current_sum_of_errors < min_sum_of_errors:
+                min_sum_of_errors = current_sum_of_errors
                 best_pose = pose_key
                 best_landmark = landmark_idx
 
-    return best_pose, best_landmark, best_full_sum
+    return best_pose, best_landmark, min_sum_of_errors
